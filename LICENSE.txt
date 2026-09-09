@@ -1,0 +1,27 @@
+Wholly Crypto — proprietary application distribution
+Copyright (c) 2026 Wholly Crypto. All rights reserved.
+
+This distribution contains the Wholly Crypto merchant application in executable
+form. No license to publish or redistribute Wholly Crypto's proprietary source
+code is granted by this notice. Use is subject to your agreement with Wholly Crypto.
+
+License terms: https://www.whollycrypto.com/terms/ (version 2026-09-08).
+Privacy notice: https://www.whollycrypto.com/privacy/.
+To the fullest extent permitted by applicable law, the application is supplied
+as is and as available without warranties. You operate your infrastructure and
+are responsible for securing credentials, wallet keys and tested backups.
+Blockchain transactions can be irreversible and funds can be lost. The terms
+contain liability exclusions and limits, subject to mandatory rights and
+liabilities that cannot lawfully be excluded. No protection against every loss
+or every legal claim is promised. Existing recorded agreements are not changed
+or deemed accepted by installing this notice.
+
+Third-party components remain subject to their own licenses and notices in
+THIRD_PARTY_NOTICES.txt. This notice does not restrict rights granted under those
+third-party licenses. Blockchain names, logos and other trademarks remain the
+property of their respective owners.
+
+Deployment and update helpers are supplied in readable form so server operators
+can inspect the system changes they perform. Browser-delivered assets are
+necessarily accessible to users. Neither compiled code nor minification is a
+guarantee against modification or reverse engineering on a root-controlled VPS.
