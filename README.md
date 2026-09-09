@@ -40,6 +40,10 @@ enabled on both hosts. Billing and update eligibility rules are unchanged.
 
 ## Files and licensing
 
+The [setup launcher](setup_wholly.sh) and [update launcher](update_wholly.sh) are
+also available directly from this repository if the primary website is offline.
+Prefer the resilient install command above and the already-installed CLI.
+
 GitHub Releases contains the same verified merchant packages, signed manifests,
 checksums and release notes as the primary download server. Repository files are
 limited to these instructions, install/update launchers and public license/key
