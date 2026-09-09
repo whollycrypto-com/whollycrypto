@@ -190,7 +190,8 @@ def download_one(url, destination, limit, *, github=False, expected_size=None, d
             # Atomic no-clobber publication; do not replace an existing file/link.
             os.link(temporary, destination)
     except urllib.error.HTTPError as error:
-        if error.code not in {404, 408, 429, 500, 502, 503, 504}:
+        # Include CDN-origin errors such as Cloudflare 520/521/522/523/524.
+        if error.code not in {404, 408, 429} and not 500 <= error.code <= 599:
             fail('Release host refused the download (HTTP ' + str(error.code) + ').')
         raise ReleaseUnavailable('Release host is unavailable.') from None
     except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException):
