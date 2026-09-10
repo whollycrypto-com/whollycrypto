@@ -20,7 +20,7 @@ if [[ "${1:-}" == "--help" ]]; then
   exit 0
 fi
 (( EUID == 0 )) || { printf 'Run this installer as root.\n' >&2; exit 1; }
-printf '\n%s\n' '########################################################' \
+printf '%s\n' '' '########################################################' \
   '###              Wholly Crypto Setup                ###' \
   '########################################################' \
   'Self-hosted payments. Your server. Your keys.' \
@@ -80,7 +80,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'printf "\n[ERROR] Setup stopped. Review the message above; no credentials are printed.\n" >&2' ERR
 python3 -I - "$bootstrap_dir" <<'PY'
-import base64, hashlib, http.client, json, os, pathlib, re, subprocess, sys, tempfile, time, urllib.error, urllib.parse, urllib.request
+import base64, hashlib, http.client, json, os, pathlib, re, shutil, subprocess, sys, tempfile, threading, time, urllib.error, urllib.parse, urllib.request
 from pathlib import Path
 root = pathlib.Path(sys.argv[1])
 ORIGIN = 'https://releases.whollycrypto.com'
@@ -97,7 +97,110 @@ def fail(message):
     raise Failure(message)
 
 def say(message):
-    print(message, flush=True)
+    progress_message(message)
+
+# Also embedded in the public bootstrap. Labels are fixed text/validated hosts,
+# never subprocess arguments, output, environment values or credentials.
+_PROGRESS_LOCK = threading.RLock()
+_ACTIVE_PROGRESS = None
+LAST_FAILED_OPERATION = ''
+
+
+def progress_message(message):
+    with _PROGRESS_LOCK:
+        if _ACTIVE_PROGRESS is not None:
+            _ACTIVE_PROGRESS.clear()
+        print(message, flush=True)
+        if _ACTIVE_PROGRESS is not None and _ACTIVE_PROGRESS.animated:
+            _ACTIVE_PROGRESS.render()
+
+
+class Progress:
+    heartbeat_seconds = 15
+
+    def __init__(self, label, *, total=None, enabled=None):
+        self.label = ''.join(c for c in label if c.isprintable())[:300]
+        self.total, self.completed = total, 0
+        self.enabled = bool(globals().get('INSTALL_STAGE')) if enabled is None else enabled
+        self.stream = sys.stdout
+        self.animated = self.stream.isatty() and os.environ.get('TERM') != 'dumb'
+        self.unicode = 'utf' in (self.stream.encoding or '').lower()
+        self.frames = ('⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏') if self.unicode else ('|', '/', '-', '\\')
+        self.frame = 0
+        self.stopped = threading.Event()
+        self.thread = None
+
+    def update(self, completed):
+        with _PROGRESS_LOCK:
+            self.completed = max(0, completed)
+
+    def detail(self):
+        elapsed = max(0, time.monotonic() - self.started)
+        duration = f'{elapsed:.1f}s' if elapsed < 60 else f'{int(elapsed)//60}m {int(elapsed)%60:02d}s'
+        amount = ''
+        if self.total:
+            amount = f'{self.completed/1048576:.1f}/{self.total/1048576:.1f} MiB, {min(100, self.completed*100/self.total):.0f}%, '
+        return '(' + amount + duration + ')'
+
+    def clear(self):
+        if self.animated:
+            self.stream.write('\r\033[2K')
+            self.stream.flush()
+
+    def render(self):
+        if self.animated:
+            prefix = self.frames[self.frame % len(self.frames)]
+            self.frame += 1
+            detail = self.detail()
+            width = shutil.get_terminal_size((80, 24)).columns
+            label = self.label[:max(8, width - len(detail) - 6)]
+            line = '  ' + prefix + ' ' + label + ' ' + detail
+            self.stream.write('\r\033[2K' + line[:max(1, width - 1)])
+        else:
+            self.stream.write('  [WAIT] ' + self.label + ' ' + self.detail() + '\n')
+        self.stream.flush()
+
+    def tick(self):
+        interval = 0.12 if self.animated else self.heartbeat_seconds
+        while not self.stopped.wait(interval):
+            try:
+                with _PROGRESS_LOCK:
+                    self.render()
+            except (OSError, ValueError):
+                self.stopped.set()  # A closed terminal must not leave a noisy thread.
+
+    def __enter__(self):
+        global _ACTIVE_PROGRESS
+        with _PROGRESS_LOCK:
+            if not self.enabled or _ACTIVE_PROGRESS is not None:
+                self.enabled = False
+                return self
+            self.started = time.monotonic()
+            _ACTIVE_PROGRESS = self
+            self.render()
+            self.thread = threading.Thread(target=self.tick, name='wholly-setup-progress', daemon=True)
+            self.thread.start()
+        return self
+
+    def __exit__(self, kind, error, traceback):
+        global _ACTIVE_PROGRESS, LAST_FAILED_OPERATION
+        if not self.enabled:
+            return False
+        self.stopped.set()
+        if self.thread:
+            self.thread.join(timeout=2)
+        with _PROGRESS_LOCK:
+            _ACTIVE_PROGRESS = None
+            self.clear()
+            status = ('✓' if kind is None else '✗') if self.animated and self.unicode else ('[OK]' if kind is None else '[FAIL]')
+            if self.animated and 'NO_COLOR' not in os.environ:
+                status = ('\033[32m' if kind is None else '\033[31m') + status + '\033[0m'
+            self.stream.write('  ' + status + ' ' + self.label + ' ' + self.detail() + '\n')
+            self.stream.flush()
+            if kind is not None:
+                LAST_FAILED_OPERATION = self.label
+        return False
+
 
 # Also embedded in the bootstrap before downloading any executable Python.
 GITHUB_REPOSITORY = 'whollycrypto-com/whollycrypto'
@@ -154,11 +257,13 @@ def release_candidates(path):
     return result
 
 
-def download_one(url, destination, limit, *, github=False, expected_size=None, digest=None):
+def download_one(url, destination, limit, *, github=False, expected_size=None, digest=None, on_progress=None):
     request = urllib.request.Request(url, headers={'User-Agent': 'WhollyCrypto-Updater/2',
                                                             'Accept-Encoding': 'identity'})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), GitHubRedirect() if github else NoRedirect())
     size = 0
+    if on_progress is not None:
+        on_progress(0)  # Each provider retry starts at zero; partial files are discarded.
     checksum = hashlib.sha256()
     # Never expose a partial download at the requested destination, including
     # a primary-host response which failed halfway through its body.
@@ -181,6 +286,8 @@ def download_one(url, destination, limit, *, github=False, expected_size=None, d
                         fail('Release download exceeded its size or time limit.')
                     checksum.update(block)
                     output.write(block)
+                    if on_progress is not None:
+                        on_progress(size)
                 output.flush()
                 os.fsync(output.fileno())
             if expected_size is not None and size != expected_size:
@@ -201,10 +308,10 @@ def download_one(url, destination, limit, *, github=False, expected_size=None, d
             os.unlink(temporary)
 
 
-def download(path, destination, limit, *, expected_size=None, digest=None):
+def download(path, destination, limit, *, expected_size=None, digest=None, on_progress=None):
     for url, github in release_candidates(path):
         try:
-            download_one(url, destination, limit, github=github, expected_size=expected_size, digest=digest)
+            download_one(url, destination, limit, github=github, expected_size=expected_size, digest=digest, on_progress=on_progress)
             return
         except ReleaseUnavailable:
             if not github and github_release_url(path):
@@ -212,38 +319,42 @@ def download(path, destination, limit, *, expected_size=None, digest=None):
     fail('Both release sources are unavailable. Check network access and retry. Nothing was installed.')
 
 
-def fetch(path, maximum):
+def fetch(path, maximum, on_progress=None):
     destination = root / ('download-' + hashlib.sha256(path.encode()).hexdigest())
-    download(path, destination, maximum)
+    download(path, destination, maximum, on_progress=on_progress)
     return destination.read_bytes()
 
 try:
-    envelope = json.loads(fetch('/channels/stable.json', 65536))
-    payload = envelope['signed']
-    (root / 'release-signing.pub').write_text(public_key)
-    (root / 'manifest.json').write_bytes(json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode())
-    signature = base64.b64decode(envelope['signature'], validate=True)
-    if not 32 <= len(signature) <= 512:
-        raise RuntimeError('Invalid signature size')
-    (root / 'manifest.sig').write_bytes(signature)
-    subprocess.run(['openssl', 'dgst', '-sha256', '-verify', str(root / 'release-signing.pub'),
-                    '-signature', str(root / 'manifest.sig'), str(root / 'manifest.json')],
-                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
-    version = payload['version']
-    if payload['format'] != 1 or payload['channel'] != 'stable' or not re.fullmatch(r'\d+\.\d+\.\d+', version):
-        raise RuntimeError('Unsupported manifest')
-    installer = payload['installer']
-    if installer['path'] != '/merchant/' + version + '/installer.py':
-        raise RuntimeError('Invalid installer path')
-    if not 1 <= installer['size'] <= 1048576 or not re.fullmatch(r'[a-f0-9]{64}', installer['sha256']):
-        raise RuntimeError('Invalid installer metadata')
-    content = fetch(installer['path'], installer['size'])
-    if len(content) != installer['size'] or hashlib.sha256(content).hexdigest() != installer['sha256']:
-        raise RuntimeError('Installer checksum does not match its signed manifest')
-    (root / 'installer.py').write_bytes(content)
-    print('[OK] Release signature and installer checksum verified.', flush=True)
+    with Progress('Download and verify release signature', enabled=True):
+        envelope = json.loads(fetch('/channels/stable.json', 65536))
+        payload = envelope['signed']
+        (root / 'release-signing.pub').write_text(public_key)
+        (root / 'manifest.json').write_bytes(json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode())
+        signature = base64.b64decode(envelope['signature'], validate=True)
+        if not 32 <= len(signature) <= 512:
+            raise RuntimeError('Invalid signature size')
+        (root / 'manifest.sig').write_bytes(signature)
+        subprocess.run(['openssl', 'dgst', '-sha256', '-verify', str(root / 'release-signing.pub'),
+                        '-signature', str(root / 'manifest.sig'), str(root / 'manifest.json')],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        version = payload['version']
+        if payload['format'] != 1 or payload['channel'] != 'stable' or not re.fullmatch(r'\d+\.\d+\.\d+', version):
+            raise RuntimeError('Unsupported manifest')
+        installer = payload['installer']
+        if installer['path'] != '/merchant/' + version + '/installer.py':
+            raise RuntimeError('Invalid installer path')
+        if not 1 <= installer['size'] <= 1048576 or not re.fullmatch(r'[a-f0-9]{64}', installer['sha256']):
+            raise RuntimeError('Invalid installer metadata')
+    with Progress('Download and verify signed installer', total=installer['size'], enabled=True) as task:
+        content = fetch(installer['path'], installer['size'], on_progress=task.update)
+        if len(content) != installer['size'] or hashlib.sha256(content).hexdigest() != installer['sha256']:
+            raise RuntimeError('Installer checksum does not match its signed manifest')
+        (root / 'installer.py').write_bytes(content)
+    print('[OK] Release signature and installer checksum verified. Wholly Crypto ' + version, flush=True)
 except Exception:
     print('Wholly Crypto: could not verify the signed installer. Nothing was installed.', file=sys.stderr)
     sys.exit(1)
 PY
+# The signed installer prints its own precise error; avoid a duplicate shell error.
+trap - ERR
 python3 -I "$bootstrap_dir/installer.py" install --signing-key "$bootstrap_dir/release-signing.pub" "$@"
