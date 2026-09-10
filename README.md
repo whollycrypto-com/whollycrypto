@@ -38,6 +38,17 @@ unavailable. Older installations must update once while the primary host is
 reachable to gain this support. Signature, checksum and downgrade checks remain
 enabled on both hosts. Billing and update eligibility rules are unchanged.
 
+Upgrading from 0.1.31 or earlier? Use the signed standalone updater once to avoid
+the old background-worker timing issue:
+
+```bash
+bash <(curl -fsSL https://releases.whollycrypto.com/update_wholly.sh)
+```
+
+It verifies the latest updater with your installed key before running it. From
+0.1.32, updates wait up to two minutes for running jobs while checkout stays
+online. Afterwards, use `whollycrypto update` normally.
+
 ## Files and licensing
 
 The [setup launcher](setup_wholly.sh) and [update launcher](update_wholly.sh) are
