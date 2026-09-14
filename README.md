@@ -18,6 +18,7 @@
   <a href="https://www.whollycrypto.com/features/">Features</a> ·
   <a href="https://www.whollycrypto.com/documentation/">Documentation</a> ·
   <a href="https://www.whollycrypto.com/api/">API</a> ·
+  <a href="https://www.whollycrypto.com/documentation/mcp/">MCP</a> ·
   <a href="https://www.whollycrypto.com/demo/">Checkout demo</a> ·
   <a href="https://github.com/whollycrypto-com/whollycrypto/issues">Issues &amp; ideas</a>
 </p>
@@ -57,10 +58,14 @@ application source repository. Wholly Crypto is proprietary software.
   USD, EUR, GBP or another available fiat currency or crypto asset.
 - **Connect your shop or backend.** Official WooCommerce and WHMCS plugins,
   PHP/Python/Node.js SDKs, signed IPN and event webhooks.
+- **Connect an AI assistant with MCP.** Read payments and balances across
+  approved projects, or separately allow invoice creation. Built into your
+  merchant API with OAuth approval and revocation; no secret-export or send tools.
 
 [Explore features](https://www.whollycrypto.com/features/) ·
 [Supported networks](https://www.whollycrypto.com/#networks) ·
 [Lightning guide](https://www.whollycrypto.com/documentation/lightning/) ·
+[MCP setup guide](https://www.whollycrypto.com/documentation/mcp/) ·
 [Compare payment processors](https://www.whollycrypto.com/compare/)
 
 Exchange conversion depends on supported direct markets, deposit networks and
@@ -118,7 +123,7 @@ before going live. Automatic refunds and recurring debits are separate workflows
 
 | SDK | Install | Runtime |
 | --- | --- | --- |
-| [PHP](https://github.com/whollycrypto-com/whollycrypto-php-sdk) | `composer require whollycrypto/php-sdk` | PHP 8.1+ |
+| [PHP](https://github.com/whollycrypto-com/whollycrypto-php-sdk) | `composer require whollycrypto/php-sdk` | PHP 7.4+ |
 | [Python](https://github.com/whollycrypto-com/whollycrypto-python-sdk) | `python -m pip install whollycrypto` | Python 3.10+ |
 | [JavaScript / TypeScript](https://github.com/whollycrypto-com/whollycrypto-node-sdk) | `npm install whollycrypto` | Node.js 22+ |
 
