@@ -9,7 +9,9 @@ if [[ "${1:-}" == "--help" ]]; then
     'openSUSE Leap 16/Tumbleweed, Arch Linux (also Mint 21+, Pop!_OS 22+, Manjaro and EndeavourOS).' \
     'Requires Python 3.9+, systemd 247+, 2 GB RAM and 3 GB free disk plus data/backups.' \
     'ARM64, Alpine/OpenRC and obsolete OS releases are not supported by this release.' \
-    'Usage: setup_wholly.sh [--domain example.com --email you@example.com] [--yes] [--resume]' \
+    'Usage: setup_wholly.sh [--version X.Y.Z] [--domain example.com --email you@example.com] [--yes] [--resume]' \
+    'Latest stable by default. --version selects an exact signed release on a fresh VPS.' \
+    '--resume keeps the saved release and completed steps; it never upgrades or downgrades an installation.' \
     '       setup_wholly.sh --check (compatibility and package plan only; no installation)' \
     'Options: --merchant-subdomain panel --pay-subdomain checkout --api-subdomain gateway' \
     '         --additional-domain example.net --currency EUR --basic-user admin' \
@@ -47,7 +49,19 @@ if [[ "$(uname -m)" != x86_64 || ! -d /run/systemd/system ]] || ! bootstrap_fami
   exit 1
 fi
 bootstrap_check=false
-for option in "$@"; do [[ "$option" != --check ]] || bootstrap_check=true; done
+bootstrap_resume=false
+for option in "$@"; do
+  [[ "$option" != --check ]] || bootstrap_check=true
+  [[ "$option" != --resume ]] || bootstrap_resume=true
+done
+if [[ "$bootstrap_check" != true && -e /root/whollycrypto && "$bootstrap_resume" != true ]]; then
+  printf 'Wholly Crypto already exists. Use whollycrypto update, or --resume for an interrupted setup. No packages were changed.\n' >&2
+  exit 1
+fi
+if [[ "$bootstrap_resume" == true && ! -f /root/whollycrypto/config/install-state.json ]]; then
+  printf 'No interrupted installation journal was found. No packages were changed.\n' >&2
+  exit 1
+fi
 bootstrap_ca=false
 for bundle in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/ca-bundle.pem; do
   [[ ! -s "$bundle" ]] || bootstrap_ca=true
@@ -79,8 +93,8 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'printf "\n[ERROR] Setup stopped. Review the message above; no credentials are printed.\n" >&2' ERR
-python3 -I - "$bootstrap_dir" <<'PY'
-import base64, hashlib, http.client, json, os, pathlib, re, shutil, subprocess, sys, tempfile, threading, time, urllib.error, urllib.parse, urllib.request
+python3 -I - "$bootstrap_dir" "$@" <<'PY'
+import argparse, base64, hashlib, http.client, json, os, pathlib, re, shutil, stat, subprocess, sys, tempfile, threading, time, urllib.error, urllib.parse, urllib.request
 from pathlib import Path
 root = pathlib.Path(sys.argv[1])
 ORIGIN = 'https://releases.whollycrypto.com'
@@ -325,7 +339,15 @@ def fetch(path, maximum, on_progress=None):
     return destination.read_bytes()
 
 try:
+    options = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    options.add_argument('--version')
+    options.add_argument('--resume', action='store_true')
+    selected, _ = options.parse_known_args(sys.argv[2:])
+    if selected.version is not None and not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', selected.version):
+        fail('Use --version X.Y.Z, for example --version 7.8.0.')
     with Progress('Download and verify release signature', enabled=True):
+        # The maintained installer handles historical packages; never execute an
+        # old installer which might ignore the pin or re-fetch latest stable.
         envelope = json.loads(fetch('/channels/stable.json', 65536))
         payload = envelope['signed']
         (root / 'release-signing.pub').write_text(public_key)
@@ -340,6 +362,8 @@ try:
         version = payload['version']
         if payload['format'] != 1 or payload['channel'] != 'stable' or not re.fullmatch(r'\d+\.\d+\.\d+', version):
             raise RuntimeError('Unsupported manifest')
+        if payload.get('installer_protocol', 0) < 2:
+            fail('This release channel does not yet have the version-pinned installer. Retry after the new signed release is published.')
         installer = payload['installer']
         if installer['path'] != '/merchant/' + version + '/installer.py':
             raise RuntimeError('Invalid installer path')
@@ -350,11 +374,37 @@ try:
         if len(content) != installer['size'] or hashlib.sha256(content).hexdigest() != installer['sha256']:
             raise RuntimeError('Installer checksum does not match its signed manifest')
         (root / 'installer.py').write_bytes(content)
-    print('[OK] Release signature and installer checksum verified. Wholly Crypto ' + version, flush=True)
-except Exception:
-    print('Wholly Crypto: could not verify the signed installer. Nothing was installed.', file=sys.stderr)
+    target = None
+    journal = Path('/root/whollycrypto/config/install-state.json')
+    if selected.resume and journal.exists():
+        info = journal.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077 or info.st_size > 131072:
+            fail('Unsafe installation journal. Setup did not change the installation.')
+        state = json.loads(journal.read_bytes())
+        target = state.get('release_manifest')
+        pinned = target['signed']['version'] if target else None
+        # Older journals have no pin; use their installed release, never latest.
+        if pinned is None:
+            installed = Path('/root/whollycrypto/release.json')
+            info = installed.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022 or info.st_size > 65536:
+                fail('Cannot safely identify the interrupted release.')
+            pinned = json.loads(installed.read_bytes())['version']
+        if selected.version and selected.version != pinned:
+            fail('Resume must use the saved release version.')
+        selected.version = pinned
+    if selected.version and not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', selected.version):
+        fail('Invalid saved release version.')
+    if target is None:
+        target = envelope if not selected.version or selected.version == version else json.loads(fetch('/merchant/' + selected.version + '/manifest.json', 65536))
+    # The signed installer independently verifies this exact envelope before any
+    # runtime package or service changes. No second latest-channel lookup.
+    (root / 'selected-release.json').write_text(json.dumps(target))
+    print('[OK] Installer signature and checksum verified. Exact target will be verified before installation.', flush=True)
+except Exception as error:
+    print(str(error) if isinstance(error, Failure) else 'Wholly Crypto: could not verify the selected signed release/installer. No application files were installed.', file=sys.stderr)
     sys.exit(1)
 PY
 # The signed installer prints its own precise error; avoid a duplicate shell error.
 trap - ERR
-python3 -I "$bootstrap_dir/installer.py" install --signing-key "$bootstrap_dir/release-signing.pub" "$@"
+python3 -I "$bootstrap_dir/installer.py" install "$@" --signing-key "$bootstrap_dir/release-signing.pub" --release-manifest "$bootstrap_dir/selected-release.json"
